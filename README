@@ -21,4 +21,8 @@
 ## Запуск
 
 - pip install -r requirements.txt
+- створіть .evn з API-key
+  TELEGRAM_TOKEN = ""
+  MINDEE_API_KEY = ""
+  GROQ_API_KEY = ""
 - python main.py
