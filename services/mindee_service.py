@@ -1,5 +1,6 @@
 import time
 import requests
+from requests.exceptions import RequestException
 import logging
 from typing import Optional, Dict
 from config.settings import settings
@@ -10,42 +11,63 @@ class MindeeBaseAPI:
     """Base class for Mindee API services"""
     
     def __init__(self):
-        self.last_request_time = 0
-        self.min_request_interval = settings.MINDEE_MIN_REQUEST_INTERVAL
-        self.max_attempts = settings.MINDEE_MAX_ATTEMPTS
-        self.retry_delay = settings.MINDEE_RETRY_DELAY
+        self.max_attempts = 5
+        self.retry_delay = 2
+        self.timeout = 30  # Спеціальний timeout для Mindee API
         
     def _make_request(self, method: str, url: str, **kwargs) -> requests.Response:
-        current_time = time.time()
-        elapsed = current_time - self.last_request_time
-        
-        if elapsed < self.min_request_interval:
-            sleep_time = self.min_request_interval - elapsed
-            logger.info(f"Waiting {sleep_time:.2f}s to avoid rate limiting")
-            time.sleep(sleep_time)
-        
-        try:
-            response = requests.request(method, url, **kwargs)
-            self.last_request_time = time.time()
-            
-            if response.status_code == 429:
-                retry_after = int(response.headers.get('Retry-After', self.retry_delay))
-                logger.warning(f"Rate limited, waiting {retry_after}s")
-                time.sleep(retry_after)
-                return self._make_request(method, url, **kwargs)
+        """Make HTTP request with error handling and rate limit management"""
+        for attempt in range(self.max_attempts):
+            try:
+                # Видаляємо timeout з kwargs, якщо він там є
+                kwargs.pop('timeout', None)
+                response = requests.request(
+                    method, 
+                    url, 
+                    timeout=self.timeout,
+                    **kwargs
+                )
                 
-            return response
-        except Exception as e:
-            logger.error(f"Request failed: {str(e)}")
-            raise
+                # Обробка 429 помилки
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', self._calculate_backoff(attempt)))
+                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                    time.sleep(retry_after)
+                    continue
+                    
+                response.raise_for_status()
+                return response
+                
+            except RequestException as e:
+                if hasattr(e, 'response') and e.response is not None and e.response.status_code == 429:
+                    retry_after = int(e.response.headers.get('Retry-After', self._calculate_backoff(attempt)))
+                    logger.warning(f"Rate limited (exception). Waiting {retry_after} seconds...")
+                    time.sleep(retry_after)
+                    continue
+                    
+                logger.error(f"Request failed (attempt {attempt+1}): {str(e)}")
+                if attempt == self.max_attempts - 1:
+                    raise
+                time.sleep(self._calculate_backoff(attempt))
+                
+            except Exception as e:
+                logger.error(f"Unexpected error (attempt {attempt+1}): {str(e)}")
+                if attempt == self.max_attempts - 1:
+                    raise
+                time.sleep(self._calculate_backoff(attempt))
+    
+    def _calculate_backoff(self, attempt: int) -> float:
+        """Calculate exponential backoff time"""
+        return min(self.retry_delay * (2 ** attempt), 60)  # Максимум 60 секунд
 
 class MindeePassportAPI(MindeeBaseAPI):
     """Service for passport document processing"""
     
     def __init__(self):
         super().__init__()
-        self.api_url = "https://api.mindee.net/v1/products/mindee/international_id/v2/predict_async"
+        self.api_url = "https://api.mindee.net/v1/products/Rajiole/id_card/v1/predict_async"
         self.headers = {"Authorization": f"Token {settings.MINDEE_API_KEY}"}
+        self.retry_delay = 3
         
     def upload_document(self, file_path: str) -> Optional[str]:
         try:
@@ -53,10 +75,9 @@ class MindeePassportAPI(MindeeBaseAPI):
                 files = {'document': f}
                 response = self._make_request(
                     'POST', 
-                    self.api_url, 
-                    headers=self.headers, 
-                    files=files, 
-                    timeout=settings.GROQ_TIMEOUT
+                    self.api_url,
+                    headers=self.headers,
+                    files=files
                 )
             
             logger.info(f"Mindee upload response: {response.text}")
@@ -77,11 +98,11 @@ class MindeePassportAPI(MindeeBaseAPI):
         if not job_id:
             return None
             
-        url = f"https://api.mindee.net/v1/products/mindee/international_id/v2/documents/queue/{job_id}"
+        url = f"https://api.mindee.net/v1/products/Rajiole/id_card/v1/documents/queue/{job_id}"
         
         for attempt in range(self.max_attempts):
             try:
-                response = self._make_request('GET', url, headers=self.headers, timeout=settings.GROQ_TIMEOUT)
+                response = self._make_request('GET', url, headers=self.headers)
                 data = response.json()
                 
                 logger.info(f"Mindee status check attempt {attempt+1}")
@@ -89,26 +110,27 @@ class MindeePassportAPI(MindeeBaseAPI):
                 if data.get('job', {}).get('status') == "completed":
                     if 'document' in data and 'id' in data['document']:
                         document_id = data['document']['id']
-                        return self.get_document_data(document_id)
+                        return self._get_document_data(document_id)
                     return data
                 elif data.get('job', {}).get('status') == "failed":
                     logger.error(f"Mindee processing failed: {data}")
                     return None
                     
-                time.sleep(self.retry_delay)
+                time.sleep(self._calculate_backoff(attempt))
             except Exception as e:
                 logger.error(f"Error checking status (attempt {attempt+1}): {str(e)}")
-                time.sleep(self.retry_delay)
+                if attempt == self.max_attempts - 1:
+                    return None
+                time.sleep(self._calculate_backoff(attempt))
         
         logger.error(f"Max attempts reached for job {job_id}")
         return None
     
-    def get_document_data(self, document_id: str) -> Optional[Dict]:
-        url = f"https://api.mindee.net/v1/products/mindee/international_id/v2/documents/{document_id}"
+    def _get_document_data(self, document_id: str) -> Optional[Dict]:
+        url = f"https://api.mindee.net/v1/products/Rajiole/id_card/v1/documents/{document_id}"
         
         try:
-            response = self._make_request('GET', url, headers=self.headers, timeout=settings.GROQ_TIMEOUT)
-            response.raise_for_status()
+            response = self._make_request('GET', url, headers=self.headers)
             return response.json()
         except Exception as e:
             logger.error(f"Error getting document data: {str(e)}")
@@ -122,18 +144,18 @@ class MindeePassportAPI(MindeeBaseAPI):
         try:
             prediction = response.get('document', {}).get('inference', {}).get('prediction', {})
             
-            surname = prediction.get('surnames', [{}])[0].get('value', 'Не знайдено')
-            given_name = prediction.get('given_names', [{}])[0].get('value', 'Не знайдено')
-            passport_number = prediction.get('document_number', {}).get('value', 'Не знайдено')
-            nationality = prediction.get('nationality', {}).get('value', 'Не знайдено')
-            birth_date = prediction.get('birth_date', {}).get('value', 'Не знайдено')
-
             return {
-                'surname': surname,
-                'given_name': given_name,
-                'passport_number': passport_number,
-                'nationality': nationality,
-                'birth_date': birth_date,
+                'document_type': prediction.get('document_type', {}).get('value'),
+                'document_number': prediction.get('document_number', {}).get('value'),
+                'surname': prediction.get('surnames', {}).get('value'),
+                'given_name': prediction.get('given_names', {}).get('value'),
+                'sex': prediction.get('sex', {}).get('value'),
+                'birth_date': prediction.get('birth_date', {}).get('value'),
+                'nationality': prediction.get('nationality', {}).get('value'),
+                'personal_number': prediction.get('personal_number', {}).get('value'),
+                'country_of_issue': prediction.get('country_of_issue', {}).get('value'),
+                'issue_date': prediction.get('issue_date', {}).get('value'),
+                'expiration_date': prediction.get('expiration_date', {}).get('value'),
                 'tech_passport': None
             }
         except Exception as e:
@@ -154,10 +176,9 @@ class MindeeVehicleAPI(MindeeBaseAPI):
                 files = {'document': f}
                 response = self._make_request(
                     'POST', 
-                    self.api_url, 
-                    headers=self.headers, 
-                    files=files, 
-                    timeout=settings.GROQ_TIMEOUT
+                    self.api_url,
+                    headers=self.headers,
+                    files=files
                 )
             
             logger.info(f"Mindee vehicle upload response: {response.text}")
@@ -182,7 +203,7 @@ class MindeeVehicleAPI(MindeeBaseAPI):
         
         for attempt in range(self.max_attempts):
             try:
-                response = self._make_request('GET', url, headers=self.headers, timeout=settings.GROQ_TIMEOUT)
+                response = self._make_request('GET', url, headers=self.headers)
                 data = response.json()
                 
                 logger.info(f"Mindee vehicle status check attempt {attempt+1}")
@@ -196,10 +217,12 @@ class MindeeVehicleAPI(MindeeBaseAPI):
                     logger.error(f"Mindee vehicle processing failed: {data}")
                     return None
                     
-                time.sleep(self.retry_delay)
+                time.sleep(self._calculate_backoff(attempt))
             except Exception as e:
                 logger.error(f"Error checking vehicle status (attempt {attempt+1}): {str(e)}")
-                time.sleep(self.retry_delay)
+                if attempt == self.max_attempts - 1:
+                    return None
+                time.sleep(self._calculate_backoff(attempt))
         
         logger.error(f"Max attempts reached for vehicle job {job_id}")
         return None
@@ -208,8 +231,7 @@ class MindeeVehicleAPI(MindeeBaseAPI):
         url = f"https://api.mindee.net/v1/products/Rajiole/vehicle_registration_certificates/v1/documents/{document_id}"
         
         try:
-            response = self._make_request('GET', url, headers=self.headers, timeout=settings.GROQ_TIMEOUT)
-            response.raise_for_status()
+            response = self._make_request('GET', url, headers=self.headers)
             return response.json()
         except Exception as e:
             logger.error(f"Error getting vehicle document data: {str(e)}")
