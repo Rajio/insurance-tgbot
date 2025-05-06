@@ -25,4 +25,5 @@
   TELEGRAM_TOKEN = ""
   MINDEE_API_KEY = ""
   GROQ_API_KEY = ""
+Замініть post та get від mindee та вкажіть свої назви даних у файлах
 - python main.py
