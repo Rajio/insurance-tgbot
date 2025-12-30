@@ -1,5 +1,52 @@
-# Insurance Bot 🤖📄
+Insurance Bot 🤖📄
 
+A Telegram bot for creating and registering car insurance policies. The bot extracts data from passport and vehicle registration documents and generates an insurance policy using AI.
+
+Features
+
+📸 Passport data recognition from photos
+
+🚗 Vehicle registration certificate recognition (2 pages)
+
+✍️ Manual data input support
+
+📝 Insurance policy generation using Groq AI
+
+📤 Delivery of the generated policy as a text file
+
+Technologies
+
+Python 3.10+
+
+python-telegram-bot (v20.3)
+
+Mindee API (document recognition)
+
+Groq API (AI text generation)
+
+python-dotenv (environment configuration)
+
+Installation & Run
+
+Install dependencies:
+
+pip install -r requirements.txt
+
+
+Create a .env file with your API keys:
+
+TELEGRAM_TOKEN=""
+MINDEE_API_KEY=""
+GROQ_API_KEY=""
+
+
+Update Mindee POST and GET requests and adjust data field names according to your document models.
+
+Run the bot:
+
+python main.py
+
+Українсько =)
 Бот для створення та реєстрації страховки на автомобіль. Розпізнає дані з паспорта та техпаспорта, генерує страховий поліс за допомогою AI.
 
 ## Функціонал
